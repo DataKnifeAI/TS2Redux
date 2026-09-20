@@ -256,10 +256,8 @@ install_files() {
   fi
 
   run_jptch "$exe" "$PAYLOAD/EXE-Appearence/TS2-EXE-Appearence-Patch.pat" "$bin/TimeSplitters2.exe"
-  if [[ -f "$bin/TimeSplitters2.exe" && ! -e "$bin/timesplitters2.exe" ]]; then
+  if [[ -e "$bin/TimeSplitters2.exe" ]]; then
     log "renaming launcher to timesplitters2.exe (Linux case-sensitive)"
-    mv "$bin/TimeSplitters2.exe" "$bin/timesplitters2.exe"
-  elif [[ -f "$bin/TimeSplitters2.exe" && -f "$bin/timesplitters2.exe" && "$bin/TimeSplitters2.exe" != "$bin/timesplitters2.exe" ]]; then
     mv -f "$bin/TimeSplitters2.exe" "$bin/timesplitters2.exe"
   fi
 
