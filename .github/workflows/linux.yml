@@ -1,0 +1,30 @@
+name: linux
+
+on:
+  push:
+    branches: [linux-edition, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax
+        run: bash -n install.sh && bash -n bin/ts2redux
+
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x install.sh bin/ts2redux
+
+      - name: Python helper
+        run: python3 lib/steam_linux.py selftest
+
+      - name: Payload
+        run: |
+          test -f Install/App-DLLs/dinput8.dll
+          test -f Install/Setup-Files/jptch.exe
+          test -f Install/EXE-Appearence/TS2-EXE-Appearence-Patch.pat

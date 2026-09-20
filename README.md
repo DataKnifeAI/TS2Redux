@@ -1,5 +1,28 @@
 
 ![TS2 Redux banner logo](Images/ts2-redux-banner-logo.png?raw=true "TS2 Redux banner logo")
+
+# TS2 Redux Linux Edition
+
+This fork targets **Linux / Steam Deck / Proton**. The Windows Inno Setup wizard is not required.
+
+You must own [Homefront: The Revolution](https://store.steampowered.com/app/223100/) on Steam. Redux only patches that install.
+
+```bash
+git clone --branch linux-edition https://github.com/DataKnifeAI/TS2Redux.git
+cd TS2Redux
+./bin/ts2redux install --shutdown-steam
+```
+
+One-liner:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DataKnifeAI/TS2Redux/linux-edition/install.sh | bash
+```
+
+`ts2redux doctor` / `ts2redux uninstall` work like [timesplice](https://github.com/DataKnifeAI/timesplice). Details: [linux/README.md](linux/README.md).
+
+Upstream Windows project: [HFTSRedux/TS2Redux](https://github.com/HFTSRedux/TS2Redux).
+
 # Introduction
 ### What Is TS2 Redux?
 **TS2 Redux** is a fan-made project which aims to fix and enhance the port of **TimeSplitters 2** (TS2) contained in the 2016 game **Homefront: The Revolution** as a hidden away as an unlockable easter-egg. This port of TS2 is rendered natively on PC and console in full HD (to 4K), with widescreen and mouse/keyboard/gamepad support. It also uses high-quality assets and audio.
@@ -225,8 +248,8 @@ Join our the [TimeSplitters Online Discord server ](https://discord.gg/fBnFZBYht
 	 - Join us on the TSO Discord server ([click here](https://discord.gg/fBnFZBYht5)) and message a member of the Redux Tech Team to inquire further.
  10. **Is this any different than playing TS2 in an emulator?**
 	 - There are a advantages and disadvantages to this port compared to playing TS2 using an emulator in Xemu (Xbox), Dolphin (GameCube), or PCXS2 (PS2). People have created mods for some of the console ports of TS2 that increase texture resolution, inject mouse/keyboard input, among other things. The overall experience of playing TS2 Redux on PC compared to playing in an emulator is very similar, except TS2 Redux (PC) does all this natively. TS2 on PC also includes high-quality audio, the TS1 map *Chemical Plant*, proper widescreen support, and more.
- 11. **Does this work with the Steam Deck?**
-	 - Yes. Install Homefront: The Revolution to your Steam Deck as usual, along with the TS2 Redux Installer app (download it from Releases on this project's GitHub page). With Homefront and TS2 Redux now installed, right click on Homefront from your Steam library and click Properties, then look at the General settings section. Add the following line of text to the box labeled Launch Options: `WINEDLLOVERRIDES="dinput8=n,b" %command%`. If you have any trouble, message us on Discord for help.
+ 11. **Does this work with the Steam Deck / Linux?**
+	 - Yes. This Linux Edition installer is the supported path: `./bin/ts2redux install --shutdown-steam`. It copies the Redux files, runs JDiff under Wine, renames the launcher to `timesplitters2.exe`, and sets `WINEDLLOVERRIDES=dinput8=n,b %command%` on Homefront plus a TimeSplitters 2 library shortcut.
 	 - ![TS2 Redux running on Steam Deck](Images/steamdeck.jpg?raw=true "TS2 Redux running Steam Deck. Image credit: ds8k, via Discord")
 # Disclaimer
 This is a fan-made project made by a small group of TimeSplitters fans over the course of several months. This project is not related to or endorsed by Free Radical Design, Eidos Interactive, Dambuster Studios, Deep Silver, or any other companies related to the development or publishing of TimeSplitters and/or Homefront: The Revolution.

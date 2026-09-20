@@ -1,0 +1,422 @@
+#!/usr/bin/env bash
+# ts2redux — TS2 Redux Linux Edition. Patch owned Homefront under Proton.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HELPER="$ROOT/lib/steam_linux.py"
+PAYLOAD="$ROOT/Install"
+
+HOMEFRONT_APPID=223100
+GAME_NAME="TimeSplitters 2"
+EXE_STOCK_MD5="0326ea202fcd7ceb3760d14bc8d07f63"
+PAK_STOCK_MD5="8a92c275b504c96092d2398a169c0433"
+LAUNCH_OPTIONS='WINEDLLOVERRIDES=dinput8=n,b %command%'
+
+FROM=""
+PROTON=""
+YES=0
+SHUTDOWN_STEAM=0
+EXTENDED=0
+REMIX=0
+HAUNTED=0
+RIP=0
+STEAM_USER=""
+STEAM_DIR="${STEAM_DIR:-}"
+
+usage() {
+  cat <<'EOF'
+ts2redux — TS2 Redux Linux Edition
+
+Splices the Homefront: The Revolution TimeSplitters 2 port onto Linux Steam
+with Proton. You must own Homefront on Steam (app 223100). This does not
+ship Homefront or TS2.
+
+Usage:
+  ts2redux install [options]   Copy Redux files, patch, wire Proton
+  ts2redux doctor              Check Steam, Homefront, DLLs, launch options
+  ts2redux uninstall           Remove Redux files and the TS2 shortcut
+  ts2redux help
+
+Options:
+  --from PATH         Homefront game folder (default: auto-detect)
+  --proton NAME       Steam compat tool (default: auto — proton-cachyos, then Proton 10)
+  --extended          Also install cheats / minigames (not Remix or Haunted)
+  --remix             Yossarian Remix story overhaul
+  --haunted           Yossarian Haunted Edition (do not combine with --remix)
+  --rip               Move unused Homefront files aside (~46 GiB → ~2.5 GiB)
+  --user ID           Steam userdata id (default: all local profiles)
+  --yes               Non-interactive
+  --shutdown-steam    Quit Steam before writing shortcuts / launch options
+
+Env:
+  STEAM_DIR           Steam root (native or Flatpak data dir)
+  WINEPREFIX          Wine prefix used only to run jptch.exe
+                      (default: ~/.cache/ts2redux/wineprefix)
+EOF
+}
+
+log() { printf '==> %s\n' "$*"; }
+warn() { printf 'ts2redux: %s\n' "$*" >&2; }
+die() { warn "$*"; exit 1; }
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+confirm() {
+  local prompt="$1"
+  if (( YES )); then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    die "refusing to continue without --yes (stdin is not a tty)"
+  fi
+  local reply=""
+  read -r -p "$prompt [y/N] " reply
+  [[ "$reply" == [yY] || "$reply" == yes ]]
+}
+
+os_release_field() {
+  local key="$1"
+  awk -F= -v k="$key" '$1==k { gsub(/"/, "", $2); print $2; exit }' /etc/os-release 2>/dev/null || true
+}
+
+detect_variant() {
+  local id id_like
+  id="$(os_release_field ID)"
+  id_like="$(os_release_field ID_LIKE)"
+  case "$id" in
+    cachyos) echo cachyos ;;
+    steamos) echo steamos ;;
+    arch | endeavouros | garuda | manjaro) echo arch ;;
+    fedora | nobara) echo fedora ;;
+    debian | ubuntu | linuxmint | pop) echo debian ;;
+    *)
+      case " $id_like " in
+        *" arch "*) echo arch ;;
+        *" fedora "*) echo fedora ;;
+        *" debian "*|*" ubuntu "*) echo debian ;;
+        *) echo generic ;;
+      esac
+      ;;
+  esac
+}
+
+steam_running() {
+  pgrep -x steam >/dev/null 2>&1 || pgrep -x steamwebhelper >/dev/null 2>&1
+}
+
+quit_steam() {
+  if ! steam_running; then
+    return 0
+  fi
+  if (( SHUTDOWN_STEAM )) || confirm "Steam is running and will overwrite config on exit. Quit Steam now?"; then
+    log "asking Steam to quit"
+    steam -shutdown >/dev/null 2>&1 || true
+    local _
+    for _ in $(seq 1 30); do
+      steam_running || return 0
+      sleep 1
+    done
+    die "Steam is still running. Quit it fully, then re-run."
+  fi
+  die "quit Steam (or pass --shutdown-steam) before writing Steam config"
+}
+
+helper() {
+  need python3
+  local -a cmd=(python3 "$HELPER" "$@")
+  [[ -n "$STEAM_DIR" ]] && cmd+=(--steam-root "$STEAM_DIR")
+  "${cmd[@]}"
+}
+
+json_field() {
+  local json="$1"
+  local key="$2"
+  python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$key" <<<"$json"
+}
+
+json_first_install() {
+  python3 -c 'import json,sys; hits=json.load(sys.stdin).get("installs") or []; print(hits[0].get("game_dir","") if hits else "")'
+}
+
+file_md5() {
+  md5sum -b "$1" | awk '{print $1}'
+}
+
+detect_game_dir() {
+  if [[ -n "$FROM" ]]; then
+    printf '%s\n' "$FROM"
+    return
+  fi
+  local info dest
+  info="$(helper find-app)"
+  dest="$(json_first_install <<<"$info")"
+  [[ -n "$dest" ]] || die "Homefront: The Revolution (app $HOMEFRONT_APPID) not found. Install it in Steam, then re-run."
+  printf '%s\n' "$dest"
+}
+
+run_jptch() {
+  local old="$1"
+  local patch="$2"
+  local dest="$3"
+  local jptch="$PAYLOAD/Setup-Files/jptch.exe"
+  [[ -f "$jptch" ]] || die "missing $jptch"
+  [[ -f "$old" ]] || die "missing $old"
+  [[ -f "$patch" ]] || die "missing $patch"
+  if [[ -f "$dest" ]]; then
+    log "already have $(basename "$dest")"
+    return 0
+  fi
+  need wine
+  local prefix="${WINEPREFIX:-$HOME/.cache/ts2redux/wineprefix}"
+  mkdir -p "$prefix"
+  log "jptch $(basename "$dest")"
+  WINEPREFIX="$prefix" WINEDEBUG=-all wine "$jptch" "$old" "$patch" "$dest"
+  [[ -f "$dest" ]] || die "jptch failed to create $dest"
+}
+
+copy_dll() {
+  local name="$1"
+  local src="$PAYLOAD/App-DLLs/TS2Redux/$name"
+  local dest_dir="$2"
+  [[ -f "$src" ]] || die "missing payload DLL $name"
+  mkdir -p "$dest_dir"
+  cp -f "$src" "$dest_dir/$name"
+}
+
+standard_dlls() {
+  printf '%s\n' \
+    mods.dll \
+    UnlockArcadeAndChallengeByFanoto.dll \
+    DisablePreferences.dll \
+    FanotoMenu.dll \
+    StraightIntoTS2byDevilDwarf.dll \
+    DevilDwarfMenu.dll \
+    DevilDwarfUI.dll \
+    GameFixesByFanotoAndDevilDwarf.dll \
+    InvisibleFixByDevilDwarf.dll \
+    DisableBreathingByDevilDwarf.dll
+}
+
+extended_dlls() {
+  printf '%s\n' \
+    DDK.dll \
+    YossariansMods.dll \
+    MinigamesByDevilDwarf.dll
+}
+
+install_files() {
+  local game="$1"
+  local bin="$game/Bin64"
+  local redux="$bin/TS2Redux"
+  local exe="$bin/Homefront2_Release.exe"
+  local pak="$game/gamehf2/lsao_cached.pak"
+
+  [[ -f "$exe" ]] || die "Homefront2_Release.exe not found in $bin"
+  [[ -f "$pak" ]] || die "lsao_cached.pak not found in $game/gamehf2"
+
+  local exe_md5 pak_md5
+  exe_md5="$(file_md5 "$exe")"
+  pak_md5="$(file_md5 "$pak")"
+  if [[ "$exe_md5" != "$EXE_STOCK_MD5" ]]; then
+    warn "Homefront exe MD5 $exe_md5 (expected $EXE_STOCK_MD5)"
+    confirm "Continue with a non-stock Homefront exe?" || die "aborted"
+  fi
+  if [[ "$pak_md5" != "$PAK_STOCK_MD5" ]]; then
+    warn "lsao_cached.pak MD5 $pak_md5 (expected $PAK_STOCK_MD5)"
+    confirm "Continue with a non-stock lsao_cached.pak?" || die "aborted"
+  fi
+
+  log "copying dinput8 loader"
+  mkdir -p "$redux"
+  cp -f "$PAYLOAD/App-DLLs/dinput8.dll" "$bin/dinput8.dll"
+
+  local dll
+  while IFS= read -r dll; do
+    copy_dll "$dll" "$redux"
+  done < <(standard_dlls)
+
+  if (( EXTENDED )); then
+    while IFS= read -r dll; do
+      copy_dll "$dll" "$redux"
+    done < <(extended_dlls)
+  fi
+  if (( REMIX )); then
+    (( HAUNTED )) && die "--remix and --haunted cannot be combined"
+    copy_dll YossarianRemix.dll "$redux"
+  fi
+  if (( HAUNTED )); then
+    copy_dll YossariansHauntedMod.dll "$redux"
+  fi
+
+  if [[ -f "$PAYLOAD/Texture-Mods/ts2_redux.pak" ]]; then
+    log "copying HD textures"
+    cp -f "$PAYLOAD/Texture-Mods/ts2_redux.pak" "$game/gamehf2/ts2_redux.pak"
+  fi
+
+  run_jptch "$exe" "$PAYLOAD/EXE-Appearence/TS2-EXE-Appearence-Patch.pat" "$bin/TimeSplitters2.exe"
+  if [[ -f "$bin/TimeSplitters2.exe" && ! -e "$bin/timesplitters2.exe" ]]; then
+    log "renaming launcher to timesplitters2.exe (Linux case-sensitive)"
+    mv "$bin/TimeSplitters2.exe" "$bin/timesplitters2.exe"
+  elif [[ -f "$bin/TimeSplitters2.exe" && -f "$bin/timesplitters2.exe" && "$bin/TimeSplitters2.exe" != "$bin/timesplitters2.exe" ]]; then
+    mv -f "$bin/TimeSplitters2.exe" "$bin/timesplitters2.exe"
+  fi
+
+  run_jptch "$pak" "$PAYLOAD/NeoTokyo-PatchV2/NeoTokyo-PatchV2.data" "$game/gamehf2/ts2_neotokyo_fix.pak"
+  if (( HAUNTED )); then
+    run_jptch "$pak" "$PAYLOAD/NeoTokyo-PatchV2/Haunted.Patch" "$game/gamehf2/TS2HauntedEdition.pak"
+  fi
+  if (( EXTENDED )); then
+    run_jptch "$pak" "$PAYLOAD/NeoTokyo-PatchV2/TS1Guns.Patch" "$game/gamehf2/TS2TS1ClassicGuns.pak"
+    run_jptch "$pak" "$PAYLOAD/NeoTokyo-PatchV2/TS2Vattic.Patch" "$game/gamehf2/TS2Vattic.pak"
+  fi
+}
+
+rip_homefront() {
+  local game="$1"
+  [[ -f "$game/Bin64/Homefront2_Release.exe" ]] || die "refusing to rip: Homefront exe missing"
+  if [[ -d "$game/ripped/gamehf2" ]]; then
+    log "ripper already ran (ripped/ exists)"
+    return 0
+  fi
+  confirm "Move unused Homefront files into $game/ripped (you will not be able to play Homefront)?" || die "aborted"
+  log "ripping unused Homefront files"
+  mkdir -p "$game/ripped/gamehf2/_activitycache" \
+    "$game/ripped/gamehf2/_levelcache" \
+    "$game/ripped/gamehf2/content" \
+    "$game/ripped/localization"
+  mv -f "$game/gamehf2/animations.pak" "$game/ripped/gamehf2/" 2>/dev/null || true
+  shopt -s nullglob
+  local f
+  for f in "$game/gamehf2"/core_patch_*; do
+    mv -f "$f" "$game/ripped/gamehf2/"
+  done
+  mv -f "$game/gamehf2/music.pak" "$game/ripped/gamehf2/" 2>/dev/null || true
+  mv -f "$game/gamehf2/sounds.pak" "$game/ripped/gamehf2/" 2>/dev/null || true
+  for f in "$game/gamehf2/_activitycache/"*; do
+    mv -f "$f" "$game/ripped/gamehf2/_activitycache/"
+  done
+  for f in "$game/localization/"*; do
+    mv -f "$f" "$game/ripped/localization/"
+  done
+  for f in "$game/ripped/localization/"*_xml.pak; do
+    mv -f "$f" "$game/localization/"
+  done
+  for f in "$game/gamehf2/content/"*; do
+    mv -f "$f" "$game/ripped/gamehf2/content/"
+  done
+  for f in "$game/gamehf2/_levelcache/"*; do
+    mv -f "$f" "$game/ripped/gamehf2/_levelcache/"
+  done
+  shopt -u nullglob
+}
+
+parse_common() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from) FROM="$2"; shift 2 ;;
+      --proton) PROTON="$2"; shift 2 ;;
+      --user) STEAM_USER="$2"; shift 2 ;;
+      --yes) YES=1; shift ;;
+      --shutdown-steam) SHUTDOWN_STEAM=1; shift ;;
+      --extended) EXTENDED=1; shift ;;
+      --remix) REMIX=1; shift ;;
+      --haunted) HAUNTED=1; shift ;;
+      --rip) RIP=1; shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+}
+
+cmd_install() {
+  parse_common "$@"
+  need python3
+  [[ -f "$PAYLOAD/App-DLLs/dinput8.dll" ]] || die "payload missing; clone the full TS2Redux repo"
+  local game variant
+  game="$(detect_game_dir)"
+  variant="$(detect_variant)"
+  log "variant=$variant homefront=$game"
+
+  confirm "Install TS2 Redux Linux Edition into $game?" || die "aborted"
+  install_files "$game"
+  if (( RIP )); then
+    rip_homefront "$game"
+  fi
+
+  quit_steam
+  local launcher="$game/Bin64/timesplitters2.exe"
+  [[ -f "$launcher" ]] || launcher="$game/Bin64/TimeSplitters2.exe"
+  [[ -f "$launcher" ]] || die "launcher exe missing after patch"
+
+  local -a wire=(python3 "$HELPER" wire --exe "$launcher" --start-dir "$game" --name "$GAME_NAME" --variant "$variant" --launch-options "$LAUNCH_OPTIONS")
+  [[ -n "$STEAM_DIR" ]] && wire+=(--steam-root "$STEAM_DIR")
+  [[ -n "$PROTON" ]] && wire+=(--proton "$PROTON")
+  [[ -n "$STEAM_USER" ]] && wire+=(--user "$STEAM_USER")
+  log "writing Steam Proton mapping and TimeSplitters 2 shortcut"
+  "${wire[@]}"
+
+  local prefix
+  if [[ -n "$STEAM_DIR" ]]; then
+    prefix="$STEAM_DIR/steamapps/compatdata/$HOMEFRONT_APPID/pfx"
+  else
+    prefix="$HOME/.local/share/Steam/steamapps/compatdata/$HOMEFRONT_APPID/pfx"
+    [[ -d "$prefix" ]] || prefix="$HOME/.steam/steam/steamapps/compatdata/$HOMEFRONT_APPID/pfx"
+  fi
+  if [[ -d "$prefix" ]]; then
+    python3 "$HELPER" fix-cfg --prefix "$prefix" >/dev/null || true
+  fi
+
+  cat <<EOF
+
+Restart Steam. Launch **TimeSplitters 2** from your library (non-Steam shortcut),
+or launch Homefront: The Revolution — dinput8 is forced on via:
+
+  $LAUNCH_OPTIONS
+
+Need Proton + Wine for the JDiff step. Homefront stays yours; this only added
+Redux files under Bin64 and gamehf2.
+EOF
+}
+
+cmd_doctor() {
+  parse_common "$@"
+  helper doctor
+}
+
+cmd_uninstall() {
+  parse_common "$@"
+  local game
+  game="$(detect_game_dir)"
+  quit_steam
+  log "removing Redux files from $game"
+  rm -f "$game/Bin64/dinput8.dll" \
+    "$game/Bin64/TimeSplitters2.exe" \
+    "$game/Bin64/timesplitters2.exe" \
+    "$game/Bin64/TimeSplitters2.VisualElementsManifest.xml" \
+    "$game/gamehf2/ts2_redux.pak" \
+    "$game/gamehf2/ts2_neotokyo_fix.pak" \
+    "$game/gamehf2/TS2HauntedEdition.pak" \
+    "$game/gamehf2/TS2TS1ClassicGuns.pak" \
+    "$game/gamehf2/TS2Vattic.pak"
+  rm -rf "$game/Bin64/TS2Redux" "$game/Bin64/tileicons"
+  local -a unwire=(python3 "$HELPER" unwire --name "$GAME_NAME")
+  [[ -n "$STEAM_DIR" ]] && unwire+=(--steam-root "$STEAM_DIR")
+  "${unwire[@]}"
+  log "Homefront files were left in place (including ripped/ if you used --rip)"
+}
+
+main() {
+  local action="${1:-help}"
+  shift || true
+  case "$action" in
+    install) cmd_install "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    help | -h | --help) usage ;;
+    *) usage >&2; exit 1 ;;
+  esac
+}
+
+main "$@"
